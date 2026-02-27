@@ -6,8 +6,8 @@
 //  Auto-scaler values from ligtas_scaler.pkl (Cell 18 output)
 // ============================================================
 
-const float SCALER_MEAN[2]  = {498.320550f, 1041243.116005f};
-const float SCALER_SCALE[2] = {288.296041f, 935218.639524f};
+const float SCALER_MEAN[4]  = {477.043574f, 262.025421f, 3.684450f, 429.809079f};
+const float SCALER_SCALE[4] = {299.387592f, 1801.101944f, 0.935068f, 304.529403f};
 
 // Result struct returned by ligtas_predict()
 struct LigtasResult {
