@@ -51,17 +51,17 @@ def read_trials(row_start, row_end):
 
 # Row ranges (matching the template layout)
 df_0v  = read_trials(6,  10)   # 5 trials  — 0V  Safe
-df_15v = read_trials(13, 27)   # 15 trials — 15V Check
-df_35v = read_trials(30, 34)   # 5 trials  — 35V Dangerous
+df_15v = read_trials(13, 27)   # 15 trials — 28V Warning
+df_35v = read_trials(30, 34)   # 5 trials  — 35V Dangerous (within 0-250V range)
 
-for label, df in [("0V", df_0v), ("15V", df_15v), ("35V", df_35v)]:
+for label, df in [("0V", df_0v), ("28V", df_15v), ("35V", df_35v)]:
     if df.empty:
         print(f"WARNING: No data found for {label}. Fill in the yellow cells in the Excel file first.")
 
 # Allow partial data — only plot what exists
 all_data = {}
 if not df_0v.empty:  all_data['0V\n(Safe)']      = df_0v
-if not df_15v.empty: all_data['15V\n(Check)']     = df_15v
+if not df_15v.empty: all_data['28V\n(Warning)']     = df_15v
 if not df_35v.empty: all_data['35V\n(Dangerous)'] = df_35v
 
 if not all_data:
@@ -69,7 +69,7 @@ if not all_data:
     sys.exit(1)
 
 conditions  = list(all_data.keys())
-cond_colors = {'0V\n(Safe)': '#22c55e', '15V\n(Check)': '#fcd34d', '35V\n(Dangerous)': '#f87171'}
+cond_colors = {'0V\n(Safe)': '#22c55e', '28V\n(Warning)': '#fcd34d', '35V\n(Dangerous)': '#f87171'}
 
 # ── Build Figure ──────────────────────────────────────────────
 fig = plt.figure(figsize=(18, 10))
@@ -139,8 +139,8 @@ ax2.grid(axis='y', color='#21262d', linewidth=0.8, linestyle='--')
 ax3 = fig.add_subplot(gs[1, :2])
 ax3.set_facecolor('#161b22')
 
-if '15V\n(Check)' in all_data:
-    df15 = all_data['15V\n(Check)']
+if '28V\n(Warning)' in all_data:
+    df15 = all_data['28V\n(Warning)']
     trials = range(1, len(df15)+1)
     ax3.fill_between(trials, df15['total'], alpha=0.15, color='#fcd34d')
     ax3.plot(trials, df15['stage1'], 'o-', color='#3b82f6',
@@ -155,7 +155,7 @@ if '15V\n(Check)' in all_data:
                 linewidth=1, alpha=0.5, label=f"Mean total = {df15['total'].mean():.1f} ms")
     ax3.set_xlabel('Trial Number', color='#9ca3af', fontsize=11)
     ax3.set_ylabel('Time (ms)', color='#9ca3af', fontsize=11)
-    ax3.set_title('Trial-by-Trial Breakdown — 15V Check Condition (15 Trials)',
+    ax3.set_title('Trial-by-Trial Breakdown — 28V Warning Condition (15 Trials)',
                   color='#f9fafb', fontsize=12, fontweight='bold', pad=10)
     ax3.set_xticks(list(trials))
     ax3.tick_params(colors='#6b7280')
@@ -213,7 +213,7 @@ for (r, c), cell in table.get_celld().items():
 ax4.set_title('Summary Statistics', color='#f9fafb',
               fontsize=11, fontweight='bold', pad=10)
 
-fig.suptitle('LIGTAS — Prototype Response Time Analysis',
+fig.suptitle('LIGTAS — Prototype Response Time Analysis (0-250V)',
              color='#f9fafb', fontsize=15, fontweight='bold', y=1.01)
 
 plt.savefig('response_time_chart.png', dpi=150,

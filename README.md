@@ -1,20 +1,43 @@
 # LIGTAS Model
 
 ## Description
-LIGTAS is a machine learning model for voltage monitoring and safety classification. The project includes a trained Random Forest model that classifies voltage readings into three categories: Safe, Check, and Dangerous. It features both Python training/validation scripts and C++ headers for embedded deployment.
+LIGTAS is a machine learning model for flood water voltage monitoring and safety classification.
+It uses a trained Random Forest model to classify voltage readings detected in flood water into
+three categories: Safe, Warning, and Dangerous. It includes both Python training/validation
+scripts and C++ headers for embedded deployment on Arduino/ESP32.
+
+## Use Case
+Monitors AC voltage leakage from downed power lines or damaged transformers spreading into
+flood water. Based on the Electric Shock Drowning (ESD) research by Rifkin & Shafer (2008),
+the system estimates the hazard surface area in flood water using the formula:
+
+```
+hazard_radius (m)  = V / 6.56
+coverage_area (m²) = π × (V / 6.56)²
+```
+
+Where 6.56 V/m is the lethal voltage gradient threshold in fresh water (2 V/ft),
+as established by the US Coast Guard ESD study.
+
+Reference: https://en.wikipedia.org/wiki/Electric_shock_drowning
+
+## Classification Thresholds
+| Class | Voltage Range | Meaning |
+|-------|--------------|---------|
+| Safe (0) | 0 – 25 V | Below ESD lethal threshold at sensor point |
+| Warning (1) | 26 – 29 V | Approaching dangerous gradient |
+| Dangerous (2) | 30 V+ | Exceeds safe exposure limit |
 
 ## Dependencies
 
 ### Python Dependencies
-The following Python packages are required:
-
-- `pandas` - Data manipulation and analysis
-- `numpy` - Numerical computing
-- `matplotlib` - Plotting and visualization
-- `seaborn` - Statistical data visualization
-- `scikit-learn` (sklearn) - Machine learning algorithms
-- `joblib` - Model serialization
-- `openpyxl` - Excel file handling
+- `pandas` — Data manipulation and analysis
+- `numpy` — Numerical computing
+- `matplotlib` — Plotting and visualization
+- `seaborn` — Statistical data visualization
+- `scikit-learn` (sklearn) — Machine learning algorithms
+- `joblib` — Model serialization
+- `openpyxl` — Excel file handling
 
 ### C++ Dependencies
 - Standard C++ libraries
@@ -23,50 +46,57 @@ The following Python packages are required:
 ## Installation
 
 ### Python Environment Setup
-1. Ensure Python 3.7+ is installed
-2. Install required packages:
-   ```bash
-   pip install pandas numpy matplotlib seaborn scikit-learn joblib openpyxl
-   ```
+```bash
+pip install pandas numpy matplotlib seaborn scikit-learn joblib openpyxl
+```
 
 ### For Jupyter Notebook
-If you plan to run the training notebook:
 ```bash
 pip install jupyter
 ```
 
 ### C++ Setup
-- Use an Arduino-compatible IDE (e.g., Arduino IDE, PlatformIO)
-- Include the header files `ligtas_ml.h` and `ligtas_model.h` in your project
+- Use Arduino IDE or PlatformIO
+- Include `ligtas_ml.h` and `ligtas_model.h` in your project
 
 ## Usage
 
 ### Training and Validation
 1. Open `ligtas_training.ipynb` in Jupyter Notebook
-2. Run the cells sequentially to train and validate the model
-3. The notebook includes data loading, preprocessing, model training, and evaluation
+2. Run cells sequentially to train and validate the model
+3. Cell 18 exports `ligtas_model.h` for Arduino (requires `micromlgen`)
 
-### Response Time Chart Generation
-1. Prepare the Excel template `ligtas_response_time_template.xlsx`
-2. Run the Python script:
+### Response Time Chart
+1. Fill in `ligtas_response_time_template.xlsx`
+2. Run:
    ```bash
    python ligtas_response_time_chart.py
    ```
-3. The script will generate `response_time_chart.png`
+3. Output: `response_time_chart.png`
 
 ### C++ Integration
-- Include `ligtas_ml.h` in your Arduino sketch
-- Use the provided scaler values and model for inference on embedded devices
+Include `ligtas_ml.h` in your Arduino sketch and call:
+```cpp
+LigtasResult result = ligtas_predict(acVoltage, prevVoltage);
+Serial.println(result.status);          // "Safe", "Warning", "Dangerous"
+Serial.println(result.hazardRadius);    // e.g. 4.57 m
+Serial.println(result.coverageAreaStr); // e.g. "65.7 m2 [!]"
+```
 
 ## Files
-- `ligtas_ml.h` - C++ ML wrapper header
-- `ligtas_model.h` - Model definitions
-- `ligtas_training.ipynb` - Jupyter notebook for training
-- `ligtas_response_time_chart.py` - Response time chart generator
-- `ligtas_voltage_dataset.csv` - Training dataset
+| File | Description |
+|------|-------------|
+| `ligtas_ml.h` | C++ ML wrapper (v4.0) — ESD formula, Safe/Warning/Dangerous |
+| `ligtas_model.h` | Exported Random Forest (100 trees, C++) |
+| `ligtas_training.ipynb` | Jupyter notebook for training and evaluation |
+| `ligtas_voltage_dataset.csv` | Training dataset (6,962 samples — 0-250V) |
+| `ligtas_response_time_chart.py` | Response time chart generator |
+| `ligtas_rf_model.pkl` | Trained Random Forest (generated by notebook) |
+| `ligtas_scaler.pkl` | StandardScaler (generated by notebook) |
 
 ## Model Details
 - Algorithm: Random Forest (100 trees)
-- Classes: 0=Safe, 1=Check, 2=Dangerous
+- Classes: 0=Safe, 1=Warning, 2=Dangerous
 - Features: 8 engineered features from voltage readings
-- Accuracy: 99.96%
+- Accuracy: 100.00% | Precision: 100.00% | Recall: 100.00%
+- Coverage formula: ESD flood water — A = π × (V/6.56)²
