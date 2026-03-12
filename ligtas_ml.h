@@ -2,7 +2,7 @@
 #include "ligtas_model.h"
 
 // ============================================================
-//  LIGTAS ML Wrapper — v5.2  (Dead Zone + Spike Debounce Fix)
+//  LIGTAS ML Wrapper — v5.3  (Hard-Threshold Debounce Bypass)
 //  Model   : Random Forest (100 trees, 3 classes)
 //  Classes : 0 = Safe  |  1 = Warning  |  2 = Dangerous
 //  Accuracy: 99.87%  Precision: 99.87%  Recall: 99.87%
@@ -13,24 +13,39 @@
 //  Classification thresholds (no gaps):
 //    0.00 – 5.00 V  →  Dead Zone (clamped to 0 = Safe, no ML)
 //    5.01 – 25.00 V →  Safe   (via ML)
-//    25.01 – 29.99 V→  Warning (via ML)
-//    30.00 – 250 V  →  Dangerous (hard threshold override)
+//    25.01 – 29.99 V→  Warning (via ML + debounce)
+//    30.00 – 250 V  →  Dangerous (hard threshold — immediate, no debounce)
 //
-//  NOISE FIXES IN v5.2:
+//  FIXES IN v5.3:
 //  ┌────────────────────────────────────────────────────────────┐
+//  │  ROOT CAUSE (v5.2 bug):                                    │
+//  │  The spike debounce filter was applied uniformly to both   │
+//  │  Warning AND Dangerous. But Dangerous ≥ 30V is decided by │
+//  │  a hard threshold — not by ML. Debouncing a deterministic  │
+//  │  rule caused real dangerous spikes (33V, 66V, 52V) to be  │
+//  │  suppressed as Safe because they appeared only once before │
+//  │  the voltage dropped. A ghost Dangerous was also produced  │
+//  │  on the reading immediately after, from residual state.    │
+//  │                                                            │
+//  │  FIX: Hard-threshold Dangerous (≥ 30V) now bypasses        │
+//  │  debounce entirely and is confirmed immediately.           │
+//  │  Debounce is kept only for ML-predicted Warning (25–30V)  │
+//  │  where boundary noise is real and false positives matter.  │
+//  │                                                            │
 //  │  1. DEAD ZONE (0–5V)                                       │
 //  │     Any reading ≤ 5V is treated as absolute 0V (Safe).     │
 //  │     The ML model is NOT called — returned immediately.     │
 //  │     Eliminates false positives from sensor noise floor.    │
 //  │                                                            │
-//  │  2. HARD THRESHOLD OVERRIDE (≥ 30V)                        │
-//  │     Any reading ≥ 30V is ALWAYS Dangerous, regardless of  │
-//  │     ML prediction. Prevents boundary bleed at 30V cutoff.  │
+//  │  2. HARD THRESHOLD OVERRIDE (≥ 30V) — IMMEDIATE           │
+//  │     Any reading ≥ 30V is ALWAYS Dangerous, confirmed       │
+//  │     instantly. Debounce state is reset so the next reading │
+//  │     starts clean. Eliminates missed dangerous spikes.      │
 //  │                                                            │
-//  │  3. SPIKE DEBOUNCE FILTER (3-reading confirmation)         │
-//  │     Warning/Dangerous is only confirmed after 3 consecutive│
-//  │     readings agree. A single spike resets the counter.     │
-//  │     Safe is always returned instantly (fail-safe design).  │
+//  │  3. SPIKE DEBOUNCE FILTER (Warning only, 3-reading)        │
+//  │     ML-predicted Warning (25–30V) still requires 3         │
+//  │     consecutive readings to confirm. Safe always clears    │
+//  │     instantly. Dangerous bypasses this block entirely.     │
 //  └────────────────────────────────────────────────────────────┘
 //
 //  Coverage Area Formula (ESD flood water surface spread):
@@ -81,8 +96,8 @@ static const float DEAD_ZONE_V        = 5.0f;
 // Bypasses ML to prevent boundary bleed at the 30V cutoff
 static const float DANGEROUS_FLOOR_V  = 30.0f;
 
-// Debounce: consecutive readings required to confirm Warning/Dangerous
-// A transient spike that drops on the next reading is filtered out
+// Debounce: consecutive readings required to confirm ML-predicted Warning only.
+// Hard-threshold Dangerous (≥ 30V) bypasses this — it is deterministic, not ML.
 static const uint8_t DEBOUNCE_COUNT   = 3;
 
 // ── Internal debounce state ───────────────────────────────────
@@ -170,12 +185,11 @@ LigtasResult ligtas_predict(float acVoltage) {
         raw_prediction = clf.predict(scaled);
     }
 
-    // ── FILTER 3: Spike Debounce ──────────────────────────────
-    // For Warning (1) or Dangerous (2): require DEBOUNCE_COUNT
-    // consecutive matching readings before confirming the alert.
-    // A single transient spike that doesn't repeat is suppressed.
-    // Safe (0) is always returned immediately (fail-safe: if the
-    // voltage drops, report safe right away without waiting).
+    // ── FILTER 3: Spike Debounce (Warning only) ──────────────
+    // Debounce applies ONLY to ML-predicted Warning (25-30V).
+    // Hard-threshold Dangerous (>= 30V) is confirmed immediately —
+    // it is deterministic and must never be delayed or suppressed.
+    // Safe (0) always clears debounce state and returns instantly.
     bool confirmed;
     int  final_prediction;
 
@@ -185,7 +199,17 @@ LigtasResult ligtas_predict(float acVoltage) {
         _debounce_pending_class = 0;
         confirmed               = true;
         final_prediction        = 0;
+    } else if (acVoltage >= DANGEROUS_FLOOR_V) {
+        // Hard-threshold Dangerous — bypass debounce entirely.
+        // Reset state so the next reading starts clean with no ghost.
+        _debounce_counter       = 0;
+        _debounce_pending_class = 0;
+        confirmed               = true;
+        final_prediction        = 2;
     } else {
+        // ML-predicted Warning (1) in the 25-30V zone:
+        // require DEBOUNCE_COUNT consecutive readings to confirm.
+        // A transient spike that doesn't repeat is suppressed.
         if (raw_prediction == (int)_debounce_pending_class) {
             _debounce_counter++;
         } else {
