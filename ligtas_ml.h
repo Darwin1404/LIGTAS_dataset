@@ -44,23 +44,23 @@
 //    [5] sensor_noise_level   — V x 0.02
 // ============================================================
 
-// ── StandardScaler values (retrained v6.0, 6 features, 2 classes) ────
+// ── StandardScaler values (retrained v6.0 revised, 6 features, 2 classes) ─
 const float SCALER_MEAN[6]  = {
-    98.558704f,     // [0] voltage_v
-    15600.461565f,  // [1] voltage_squared
-    1138.884394f,   // [2] coverage_area_m2
-    2.832930f,      // [3] voltage_class
-    12.343438f,     // [4] danger_score
-    1.981728f       // [5] sensor_noise_level
+    98.928814f,     // [0] voltage_v
+    15660.134569f,  // [1] voltage_squared
+    1143.240717f,   // [2] coverage_area_m2
+    2.839912f,      // [3] voltage_class
+    12.387490f,     // [4] danger_score
+    1.991743f       // [5] sensor_noise_level
 };
 
 const float SCALER_SCALE[6] = {
-    76.724465f,     // [0] voltage_v
-    18147.952530f,  // [1] voltage_squared
-    1324.859513f,   // [2] coverage_area_m2
-    1.322703f,      // [3] voltage_class
-    7.751147f,      // [4] danger_score
-    1.950392f       // [5] sensor_noise_level
+    76.636964f,     // [0] voltage_v
+    18163.302349f,  // [1] voltage_squared
+    1325.980100f,   // [2] coverage_area_m2
+    1.320061f,      // [3] voltage_class
+    7.733209f,      // [4] danger_score
+    1.940684f       // [5] sensor_noise_level
 };
 
 // ── Constants ─────────────────────────────────────────────────
