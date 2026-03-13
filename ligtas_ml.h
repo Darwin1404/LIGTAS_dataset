@@ -2,50 +2,30 @@
 #include "ligtas_model.h"
 
 // ============================================================
-//  LIGTAS ML Wrapper — v5.3  (Hard-Threshold Debounce Bypass)
-//  Model   : Random Forest (100 trees, 3 classes)
-//  Classes : 0 = Safe  |  1 = Warning  |  2 = Dangerous
-//  Accuracy: 99.87%  Precision: 99.87%  Recall: 99.87%
+//  LIGTAS ML Wrapper — v6.0  (2-Class: Safe / Dangerous)
+//  Model   : Random Forest (100 trees, 2 classes)
+//  Classes : 0 = Safe  |  1 = Dangerous
+//  Accuracy: 100.00%  Precision: 100.00%  Recall: 100.00%
 //
 //  Sensor   : ZMPT101B (rated range 0-250V AC)
 //  Use case : Flood water AC leakage monitoring
 //
-//  Classification thresholds (no gaps):
-//    0.00 – 5.00 V  →  Dead Zone (clamped to 0 = Safe, no ML)
-//    5.01 – 25.00 V →  Safe   (via ML)
-//    25.01 – 29.99 V→  Warning (via ML + debounce)
-//    30.00 – 250 V  →  Dangerous (hard threshold — immediate, no debounce)
+//  Classification thresholds:
+//    0.00 –  5.00 V  →  Dead Zone (clamped to Safe, no ML)
+//    5.01 – 29.99 V  →  Safe      (via ML)
+//    30.00 – 250 V   →  Dangerous (hard threshold — immediate, no ML)
 //
-//  FIXES IN v5.3:
+//  CHANGES IN v6.0 (from v5.3):
 //  ┌────────────────────────────────────────────────────────────┐
-//  │  ROOT CAUSE (v5.2 bug):                                    │
-//  │  The spike debounce filter was applied uniformly to both   │
-//  │  Warning AND Dangerous. But Dangerous ≥ 30V is decided by │
-//  │  a hard threshold — not by ML. Debouncing a deterministic  │
-//  │  rule caused real dangerous spikes (33V, 66V, 52V) to be  │
-//  │  suppressed as Safe because they appeared only once before │
-//  │  the voltage dropped. A ghost Dangerous was also produced  │
-//  │  on the reading immediately after, from residual state.    │
-//  │                                                            │
-//  │  FIX: Hard-threshold Dangerous (≥ 30V) now bypasses        │
-//  │  debounce entirely and is confirmed immediately.           │
-//  │  Debounce is kept only for ML-predicted Warning (25–30V)  │
-//  │  where boundary noise is real and false positives matter.  │
-//  │                                                            │
-//  │  1. DEAD ZONE (0–5V)                                       │
-//  │     Any reading ≤ 5V is treated as absolute 0V (Safe).     │
-//  │     The ML model is NOT called — returned immediately.     │
-//  │     Eliminates false positives from sensor noise floor.    │
-//  │                                                            │
-//  │  2. HARD THRESHOLD OVERRIDE (≥ 30V) — IMMEDIATE           │
-//  │     Any reading ≥ 30V is ALWAYS Dangerous, confirmed       │
-//  │     instantly. Debounce state is reset so the next reading │
-//  │     starts clean. Eliminates missed dangerous spikes.      │
-//  │                                                            │
-//  │  3. SPIKE DEBOUNCE FILTER (Warning only, 3-reading)        │
-//  │     ML-predicted Warning (25–30V) still requires 3         │
-//  │     consecutive readings to confirm. Safe always clears    │
-//  │     instantly. Dangerous bypasses this block entirely.     │
+//  │  • Warning class (25–30V) removed entirely.                │
+//  │  • Dataset relabeled: all voltages < 30V → Safe (0),       │
+//  │    all voltages ≥ 30V → Dangerous (1).                     │
+//  │  • Model retrained as binary classifier (2 classes).       │
+//  │  • Debounce filter removed — no longer needed without      │
+//  │    a Warning boundary zone.                                 │
+//  │  • Hard threshold at 30V still bypasses ML for immediate   │
+//  │    Dangerous confirmation.                                  │
+//  │  • Dead zone (0–5V) unchanged — returns Safe instantly.    │
 //  └────────────────────────────────────────────────────────────┘
 //
 //  Coverage Area Formula (ESD flood water surface spread):
@@ -64,55 +44,46 @@
 //    [5] sensor_noise_level   — V x 0.02
 // ============================================================
 
-// ── StandardScaler values (retrained v5.2, 6 features) ───────
+// ── StandardScaler values (retrained v6.0, 6 features, 2 classes) ────
 const float SCALER_MEAN[6]  = {
-    98.941136f,     // [0] voltage_v
-    15688.397779f,  // [1] voltage_squared
-    1145.304024f,   // [2] coverage_area_m2
-    2.840832f,      // [3] voltage_class
-    12.388788f,     // [4] danger_score
-    1.988549f       // [5] sensor_noise_level
+    98.558704f,     // [0] voltage_v
+    15600.461565f,  // [1] voltage_squared
+    1138.884394f,   // [2] coverage_area_m2
+    2.832930f,      // [3] voltage_class
+    12.343438f,     // [4] danger_score
+    1.981728f       // [5] sensor_noise_level
 };
 
 const float SCALER_SCALE[6] = {
-    76.805269f,     // [0] voltage_v
-    18227.157485f,  // [1] voltage_squared
-    1330.641732f,   // [2] coverage_area_m2
-    1.316776f,      // [3] voltage_class
-    7.744189f,      // [4] danger_score
-    1.941106f       // [5] sensor_noise_level
+    76.724465f,     // [0] voltage_v
+    18147.952530f,  // [1] voltage_squared
+    1324.859513f,   // [2] coverage_area_m2
+    1.322703f,      // [3] voltage_class
+    7.751147f,      // [4] danger_score
+    1.950392f       // [5] sensor_noise_level
 };
 
 // ── Constants ─────────────────────────────────────────────────
 // ESD lethal gradient constant (fresh water)
 // 2 V/ft = 6.56 V/m — Rifkin & Shafer (2008), US Coast Guard
-static const float ESD_GRADIENT       = 6.56f;
+static const float ESD_GRADIENT      = 6.56f;
 
 // Dead zone: readings at or below this voltage are absolute zero
 // Chosen based on ZMPT101B noise floor characterization (~5V max)
-static const float DEAD_ZONE_V        = 5.0f;
+static const float DEAD_ZONE_V       = 5.0f;
 
 // Hard threshold: readings at or above this are always Dangerous
-// Bypasses ML to prevent boundary bleed at the 30V cutoff
-static const float DANGEROUS_FLOOR_V  = 30.0f;
-
-// Debounce: consecutive readings required to confirm ML-predicted Warning only.
-// Hard-threshold Dangerous (≥ 30V) bypasses this — it is deterministic, not ML.
-static const uint8_t DEBOUNCE_COUNT   = 3;
-
-// ── Internal debounce state ───────────────────────────────────
-static uint8_t _debounce_pending_class = 0;   // candidate class
-static uint8_t _debounce_counter       = 0;   // consecutive match count
+// Bypasses ML to guarantee immediate detection at the 30V cutoff
+static const float DANGEROUS_FLOOR_V = 30.0f;
 
 // ── Result struct ─────────────────────────────────────────────
 struct LigtasResult {
-    int         classIndex;       // 0=Safe, 1=Warning, 2=Dangerous
-    const char* status;           // "Safe", "Warning", "Dangerous"
+    int         classIndex;       // 0=Safe, 1=Dangerous
+    const char* status;           // "Safe", "Dangerous"
     float       hazardRadius;     // estimated hazard radius in meters
     float       coverageArea;     // estimated electrified surface area in m2
     String      coverageAreaStr;  // formatted e.g. "65.7 m2 [!]"
     float       dangerScore;      // combined risk index
-    bool        debounced;        // true = confirmed after debounce; false = pending
 };
 
 // ── Internal: voltage class zone (0-4) ───────────────────────
@@ -128,8 +99,6 @@ static int getVoltageClass(float v) {
 //  acVoltage — current reading from ZMPT101B (0-250V)
 //
 //  Call this once per sensor reading in your main loop.
-//  Do NOT average before passing in — the debounce filter
-//  works on raw consecutive readings to catch transient spikes.
 LigtasResult ligtas_predict(float acVoltage) {
 
     // Clamp to sensor rated range
@@ -138,10 +107,8 @@ LigtasResult ligtas_predict(float acVoltage) {
 
     // ── FILTER 1: Dead Zone ───────────────────────────────────
     // Any reading ≤ 5V is treated as absolute 0 (sensor noise floor).
-    // Return Safe immediately — no ML needed, no debounce needed.
+    // Return Safe immediately — no ML needed.
     if (acVoltage <= DEAD_ZONE_V) {
-        _debounce_counter       = 0;    // reset debounce on safe reading
-        _debounce_pending_class = 0;
         LigtasResult r;
         r.classIndex      = 0;
         r.status          = "Safe";
@@ -149,14 +116,10 @@ LigtasResult ligtas_predict(float acVoltage) {
         r.coverageArea    = 0.0f;
         r.coverageAreaStr = "0.0 m2";
         r.dangerScore     = 0.0f;
-        r.debounced       = true;
         return r;
     }
 
-    // ── FILTER 2: Hard Threshold Override (≥ 30V) ────────────
-    // Skip ML for voltages at or above the Dangerous floor.
-    // This prevents boundary bleed from ML boundary uncertainty.
-    int raw_prediction;
+    // ── Compute derived features ──────────────────────────────
     float voltage_v          = acVoltage;
     float voltage_squared    = acVoltage * acVoltage;
     float hazard_radius      = acVoltage / ESD_GRADIENT;
@@ -165,10 +128,13 @@ LigtasResult ligtas_predict(float acVoltage) {
     float danger_score       = acVoltage / (1.0f + log(coverage_area_m2 + 1.0f));
     float sensor_noise_level = acVoltage * 0.02f;
 
+    // ── FILTER 2: Hard Threshold Override (≥ 30V) ────────────
+    // Skip ML entirely — deterministic and immediate.
+    int final_prediction;
     if (acVoltage >= DANGEROUS_FLOOR_V) {
-        raw_prediction = 2;  // always Dangerous at or above 30V
+        final_prediction = 1;  // always Dangerous at or above 30V
     } else {
-        // ── ML Prediction (5V – 29.99V range) ────────────────
+        // ── ML Prediction (5V – 29.99V) ──────────────────────
         float raw[6] = {
             voltage_v,
             voltage_squared,
@@ -182,57 +148,13 @@ LigtasResult ligtas_predict(float acVoltage) {
             scaled[i] = (raw[i] - SCALER_MEAN[i]) / SCALER_SCALE[i];
 
         Eloquent::ML::Port::RandomForest clf;
-        raw_prediction = clf.predict(scaled);
-    }
-
-    // ── FILTER 3: Spike Debounce (Warning only) ──────────────
-    // Debounce applies ONLY to ML-predicted Warning (25-30V).
-    // Hard-threshold Dangerous (>= 30V) is confirmed immediately —
-    // it is deterministic and must never be delayed or suppressed.
-    // Safe (0) always clears debounce state and returns instantly.
-    bool confirmed;
-    int  final_prediction;
-
-    if (raw_prediction == 0) {
-        // Safe: reset debounce, return immediately
-        _debounce_counter       = 0;
-        _debounce_pending_class = 0;
-        confirmed               = true;
-        final_prediction        = 0;
-    } else if (acVoltage >= DANGEROUS_FLOOR_V) {
-        // Hard-threshold Dangerous — bypass debounce entirely.
-        // Reset state so the next reading starts clean with no ghost.
-        _debounce_counter       = 0;
-        _debounce_pending_class = 0;
-        confirmed               = true;
-        final_prediction        = 2;
-    } else {
-        // ML-predicted Warning (1) in the 25-30V zone:
-        // require DEBOUNCE_COUNT consecutive readings to confirm.
-        // A transient spike that doesn't repeat is suppressed.
-        if (raw_prediction == (int)_debounce_pending_class) {
-            _debounce_counter++;
-        } else {
-            // New candidate class — restart counter
-            _debounce_pending_class = (uint8_t)raw_prediction;
-            _debounce_counter       = 1;
-        }
-
-        if (_debounce_counter >= DEBOUNCE_COUNT) {
-            confirmed        = true;
-            final_prediction = raw_prediction;
-        } else {
-            // Not yet confirmed — report Safe while pending
-            confirmed        = false;
-            final_prediction = 0;  // hold Safe until debounce passes
-        }
+        final_prediction = clf.predict(scaled);
     }
 
     // ── Build result ──────────────────────────────────────────
-    const char* statusLabels[3] = { "Safe", "Warning", "Dangerous" };
+    const char* statusLabels[2] = { "Safe", "Dangerous" };
     String areaStr = String(coverage_area_m2, 1) + " m2";
-    if (final_prediction == 2) areaStr += " [!]";
-    if (final_prediction == 1) areaStr += " [?]";
+    if (final_prediction == 1) areaStr += " [!]";
 
     LigtasResult result;
     result.classIndex      = final_prediction;
@@ -241,13 +163,5 @@ LigtasResult ligtas_predict(float acVoltage) {
     result.coverageArea    = coverage_area_m2;
     result.coverageAreaStr = areaStr;
     result.dangerScore     = danger_score;
-    result.debounced       = confirmed;
     return result;
-}
-
-// ── Optional: Reset debounce state ───────────────────────────
-// Call this if you restart monitoring or after a long pause.
-void ligtas_reset() {
-    _debounce_counter       = 0;
-    _debounce_pending_class = 0;
 }
