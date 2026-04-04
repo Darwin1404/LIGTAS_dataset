@@ -1,6 +1,6 @@
 """
-LIGTAS — Response Time Chart Generator
-========================================
+LIGTAS — Response Time Chart Generator (v7.0)
+==============================================
 Run this script AFTER you fill in the Excel template.
 
 Usage:
@@ -10,6 +10,10 @@ Input:  ligtas_response_time_template.xlsx  (must be in same folder)
 Output: response_time_chart.png             (ready for your thesis)
 
 Requires: pip install openpyxl pandas matplotlib
+
+Conditions (v7.0 — 2-Class, no Warning):
+    0V   — Safe baseline
+    35V  — Dangerous (sustained leakage)
 """
 
 import pandas as pd
@@ -29,8 +33,8 @@ if not os.path.exists(EXCEL_FILE):
     print(f"ERROR: '{EXCEL_FILE}' not found. Make sure it is in the same folder.")
     sys.exit(1)
 
-wb   = load_workbook(EXCEL_FILE, data_only=True)
-ws   = wb['Response Time Data']
+wb = load_workbook(EXCEL_FILE, data_only=True)
+ws = wb['Response Time Data']
 
 def read_trials(row_start, row_end):
     """Read Stage1, Stage2, Stage3, Total from rows row_start to row_end."""
@@ -49,19 +53,17 @@ def read_trials(row_start, row_end):
             })
     return pd.DataFrame(records)
 
-# Row ranges (matching the template layout)
-df_0v  = read_trials(6,  10)   # 5 trials  — 0V  Safe
-df_15v = read_trials(13, 27)   # 15 trials — 28V Warning
-df_35v = read_trials(30, 34)   # 5 trials  — 35V Dangerous (within 0-250V range)
+# Row ranges (update these to match your Excel template layout)
+df_0v  = read_trials(6,  10)   # 5 trials  — 0V  Safe baseline
+df_35v = read_trials(13, 27)   # 15 trials — 35V Dangerous (sustained)
 
-for label, df in [("0V", df_0v), ("28V", df_15v), ("35V", df_35v)]:
+for label, df in [("0V", df_0v), ("35V", df_35v)]:
     if df.empty:
         print(f"WARNING: No data found for {label}. Fill in the yellow cells in the Excel file first.")
 
 # Allow partial data — only plot what exists
 all_data = {}
 if not df_0v.empty:  all_data['0V\n(Safe)']      = df_0v
-if not df_15v.empty: all_data['28V\n(Warning)']     = df_15v
 if not df_35v.empty: all_data['35V\n(Dangerous)'] = df_35v
 
 if not all_data:
@@ -69,7 +71,7 @@ if not all_data:
     sys.exit(1)
 
 conditions  = list(all_data.keys())
-cond_colors = {'0V\n(Safe)': '#22c55e', '28V\n(Warning)': '#fcd34d', '35V\n(Dangerous)': '#f87171'}
+cond_colors = {'0V\n(Safe)': '#22c55e', '35V\n(Dangerous)': '#f87171'}
 
 # ── Build Figure ──────────────────────────────────────────────
 fig = plt.figure(figsize=(18, 10))
@@ -82,24 +84,26 @@ ax1.set_facecolor('#161b22')
 
 stage_labels = ['Stage 1\nSensor→Packet', 'Stage 2\nML Classify', 'Stage 3\nDisplay Update']
 stage_colors = ['#3b82f6', '#f59e0b', '#8b5cf6']
-x = np.arange(len(conditions))
+x     = np.arange(len(conditions))
 width = 0.25
 
 for si, (slabel, scolor) in enumerate(zip(stage_labels, stage_colors)):
     means = []
     errs  = []
     for cond in conditions:
-        df = all_data[cond]
-        col = ['stage1','stage2','stage3'][si]
+        df  = all_data[cond]
+        col = ['stage1', 'stage2', 'stage3'][si]
         means.append(df[col].mean())
         errs.append(df[col].std() if len(df) > 1 else 0)
-    bars = ax1.bar(x + si*width, means, width,
+    bars = ax1.bar(x + si * width, means, width,
                    label=slabel, color=scolor, alpha=0.85,
                    yerr=errs, capsize=4,
                    error_kw={'ecolor': 'white', 'alpha': 0.6})
-    for bar, mean in zip(bars, means):
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(errs)*0.1 + 0.2,
-                 f'{mean:.1f}', ha='center', va='bottom', color='white', fontsize=8)
+    for bar, mean, err in zip(bars, means, errs):
+        ax1.text(bar.get_x() + bar.get_width() / 2,
+                 bar.get_height() + max(errs) * 0.1 + 0.2,
+                 f'{mean:.1f}', ha='center', va='bottom',
+                 color='white', fontsize=8)
 
 ax1.set_xticks(x + width)
 ax1.set_xticklabels(conditions, color='#e5e7eb', fontsize=11)
@@ -126,7 +130,7 @@ for patch, color in zip(bp['boxes'], box_colors):
     patch.set_facecolor(color)
     patch.set_alpha(0.7)
 
-ax2.set_xticks(range(1, len(conditions)+1))
+ax2.set_xticks(range(1, len(conditions) + 1))
 ax2.set_xticklabels(conditions, color='#e5e7eb', fontsize=9)
 ax2.set_ylabel('Total Time (ms)', color='#9ca3af', fontsize=10)
 ax2.set_title('Total Response\nDistribution', color='#f9fafb',
@@ -135,27 +139,29 @@ ax2.tick_params(colors='#6b7280')
 for sp in ax2.spines.values(): sp.set_color('#30363d')
 ax2.grid(axis='y', color='#21262d', linewidth=0.8, linestyle='--')
 
-# ── Plot 3: Trial-by-trial line (15V — most trials) ───────────
+# ── Plot 3: Trial-by-trial line for Dangerous condition ───────
 ax3 = fig.add_subplot(gs[1, :2])
 ax3.set_facecolor('#161b22')
 
-if '28V\n(Warning)' in all_data:
-    df15 = all_data['28V\n(Warning)']
-    trials = range(1, len(df15)+1)
-    ax3.fill_between(trials, df15['total'], alpha=0.15, color='#fcd34d')
-    ax3.plot(trials, df15['stage1'], 'o-', color='#3b82f6',
+danger_key = '35V\n(Dangerous)'
+if danger_key in all_data:
+    df35   = all_data[danger_key]
+    trials = range(1, len(df35) + 1)
+    ax3.fill_between(trials, df35['total'], alpha=0.15, color='#f87171')
+    ax3.plot(trials, df35['stage1'], 'o-', color='#3b82f6',
              linewidth=1.5, markersize=5, label='Stage 1: Sensor→Packet')
-    ax3.plot(trials, df15['stage2'], 's-', color='#f59e0b',
+    ax3.plot(trials, df35['stage2'], 's-', color='#f59e0b',
              linewidth=1.5, markersize=5, label='Stage 2: ML Classify')
-    ax3.plot(trials, df15['stage3'], '^-', color='#8b5cf6',
+    ax3.plot(trials, df35['stage3'], '^-', color='#8b5cf6',
              linewidth=1.5, markersize=5, label='Stage 3: Display Update')
-    ax3.plot(trials, df15['total'],  'D-', color='#fcd34d',
+    ax3.plot(trials, df35['total'],  'D-', color='#f87171',
              linewidth=2,   markersize=6, label='Total', zorder=5)
-    ax3.axhline(df15['total'].mean(), color='white', linestyle='--',
-                linewidth=1, alpha=0.5, label=f"Mean total = {df15['total'].mean():.1f} ms")
+    ax3.axhline(df35['total'].mean(), color='white', linestyle='--',
+                linewidth=1, alpha=0.5,
+                label=f"Mean total = {df35['total'].mean():.1f} ms")
     ax3.set_xlabel('Trial Number', color='#9ca3af', fontsize=11)
     ax3.set_ylabel('Time (ms)', color='#9ca3af', fontsize=11)
-    ax3.set_title('Trial-by-Trial Breakdown — 28V Warning Condition (15 Trials)',
+    ax3.set_title('Trial-by-Trial Breakdown — 35V Dangerous Condition (15 Trials)',
                   color='#f9fafb', fontsize=12, fontweight='bold', pad=10)
     ax3.set_xticks(list(trials))
     ax3.tick_params(colors='#6b7280')
@@ -168,7 +174,6 @@ ax4 = fig.add_subplot(gs[1, 2])
 ax4.set_facecolor('#161b22')
 ax4.axis('off')
 
-rows = [['Metric'] + [c.replace('\n',' ') for c in conditions] + ['Overall']]
 all_totals = pd.concat([all_data[c]['total'] for c in conditions])
 
 stat_rows = [
@@ -176,22 +181,22 @@ stat_rows = [
     ('Median (ms)', lambda d: f"{d['total'].median():.2f}"),
     ('Min (ms)',    lambda d: f"{d['total'].min():.2f}"),
     ('Max (ms)',    lambda d: f"{d['total'].max():.2f}"),
-    ('Std Dev',     lambda d: f"{d['total'].std():.2f}" if len(d)>1 else "—"),
+    ('Std Dev',     lambda d: f"{d['total'].std():.2f}" if len(d) > 1 else "—"),
     ('Trials',      lambda d: str(len(d))),
 ]
+
+rows = [['Metric'] + [c.replace('\n', ' ') for c in conditions] + ['Overall']]
 for label, fn in stat_rows:
     row_vals = [label]
     for c in conditions:
         row_vals.append(fn(all_data[c]))
-    # Overall
-    overall_df = pd.DataFrame({'total': all_totals})
-    row_vals.append(fn(overall_df))
+    row_vals.append(fn(pd.DataFrame({'total': all_totals})))
     rows.append(row_vals)
 
 n_cols = len(rows[0])
-table = ax4.table(cellText=rows[1:], colLabels=rows[0],
-                  cellLoc='center', loc='center',
-                  bbox=[0, 0, 1, 1])
+table  = ax4.table(cellText=rows[1:], colLabels=rows[0],
+                   cellLoc='center', loc='center',
+                   bbox=[0, 0, 1, 1])
 table.auto_set_font_size(False)
 table.set_fontsize(8.5)
 
@@ -213,7 +218,7 @@ for (r, c), cell in table.get_celld().items():
 ax4.set_title('Summary Statistics', color='#f9fafb',
               fontsize=11, fontweight='bold', pad=10)
 
-fig.suptitle('LIGTAS — Prototype Response Time Analysis (0-250V)',
+fig.suptitle('LIGTAS — Prototype Response Time Analysis (v7.0, 0-250V, Spike-Aware)',
              color='#f9fafb', fontsize=15, fontweight='bold', y=1.01)
 
 plt.savefig('response_time_chart.png', dpi=150,
@@ -222,5 +227,5 @@ print("✅ Chart saved: response_time_chart.png")
 print(f"\nSummary:")
 for cond in conditions:
     df = all_data[cond]
-    print(f"  {cond.replace(chr(10),' '):<20} mean={df['total'].mean():.2f}ms  "
+    print(f"  {cond.replace(chr(10), ' '):<22} mean={df['total'].mean():.2f}ms  "
           f"min={df['total'].min():.2f}ms  max={df['total'].max():.2f}ms")

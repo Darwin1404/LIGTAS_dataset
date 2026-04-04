@@ -2,30 +2,31 @@
 #include "ligtas_model.h"
 
 // ============================================================
-//  LIGTAS ML Wrapper — v6.0  (2-Class: Safe / Dangerous)
+//  LIGTAS ML Wrapper — v7.0  (2-Class: Safe / Dangerous)
 //  Model   : Random Forest (100 trees, 2 classes)
 //  Classes : 0 = Safe  |  1 = Dangerous
-//  Accuracy: 100.00%  Precision: 100.00%  Recall: 100.00%
+//  Accuracy: 96.54%  Precision: 96.54%  Recall: 96.54%
 //
 //  Sensor   : ZMPT101B (rated range 0-250V AC)
 //  Use case : Flood water AC leakage monitoring
+//  Sampling : 500ms interval (call ligtas_predict every 500ms)
 //
 //  Classification thresholds:
 //    0.00 –  5.00 V  →  Dead Zone (clamped to Safe, no ML)
-//    5.01 – 29.99 V  →  Safe      (via ML)
-//    30.00 – 250 V   →  Dangerous (hard threshold — immediate, no ML)
+//    5.01 – 250 V    →  ML decision (all cases, no hard threshold)
 //
-//  CHANGES IN v6.0 (from v5.3):
+//  CHANGES IN v7.0 (from v6.0):
 //  ┌────────────────────────────────────────────────────────────┐
-//  │  • Warning class (25–30V) removed entirely.                │
-//  │  • Dataset relabeled: all voltages < 30V → Safe (0),       │
-//  │    all voltages ≥ 30V → Dangerous (1).                     │
-//  │  • Model retrained as binary classifier (2 classes).       │
-//  │  • Debounce filter removed — no longer needed without      │
-//  │    a Warning boundary zone.                                 │
-//  │  • Hard threshold at 30V still bypasses ML for immediate   │
-//  │    Dangerous confirmation.                                  │
-//  │  • Dead zone (0–5V) unchanged — returns Safe instantly.    │
+//  │  • Hard threshold at 30V REMOVED — ML now handles all      │
+//  │    decisions above dead zone.                              │
+//  │  • Spike rejection added via 3 new temporal features:      │
+//  │      dv_dt          — voltage change from previous sample  │
+//  │      rolling_mean_5 — average of last 5 readings (2.5s)   │
+//  │      consec_above_30 — consecutive readings >= 30V         │
+//  │  • Spikes (1-2 samples of high V) → classified as Safe     │
+//  │  • Real leakage (sustained ≥30V, consec ≥ 3) → Dangerous  │
+//  │  • Dataset expanded with labeled spike samples.            │
+//  │  • Feature count: 6 → 9                                   │
 //  └────────────────────────────────────────────────────────────┘
 //
 //  Coverage Area Formula (ESD flood water surface spread):
@@ -35,46 +36,56 @@
 //    coverage_area (m2) = pi x (V / 6.56)^2
 //    Ref: https://en.wikipedia.org/wiki/Electric_shock_drowning
 //
-//  Features (6):
+//  Features (9):
 //    [0] voltage_v            — raw sensor reading (clamped, dead zone applied)
 //    [1] voltage_squared      — V^2
 //    [2] coverage_area_m2     — pi x (V/6.56)^2
 //    [3] voltage_class        — 0-4 zone category
 //    [4] danger_score         — V / (1 + log(area+1))
 //    [5] sensor_noise_level   — V x 0.02
+//    [6] dv_dt                — change from previous reading (spike detector)
+//    [7] rolling_mean_5       — average of last 5 readings
+//    [8] consec_above_30      — consecutive readings >= 30V
+//
+//  IMPORTANT: Call ligtas_predict() exactly once every 500ms.
+//             Temporal features depend on this timing.
 // ============================================================
 
-// ── StandardScaler values (retrained v6.0 revised, 6 features, 2 classes) ─
-const float SCALER_MEAN[6]  = {
-    98.928814f,     // [0] voltage_v
-    15660.134569f,  // [1] voltage_squared
-    1143.240717f,   // [2] coverage_area_m2
-    2.839912f,      // [3] voltage_class
-    12.387490f,     // [4] danger_score
-    1.991743f       // [5] sensor_noise_level
+// ── StandardScaler values (v7.0, 9 features, 2 classes) ──────
+const float SCALER_MEAN[9]  = {
+    87.236891f,     // [0] voltage_v
+    12524.263352f,  // [1] voltage_squared
+    914.311927f,    // [2] coverage_area_m2
+    2.858557f,      // [3] voltage_class
+    11.416161f,     // [4] danger_score
+    1.744738f,      // [5] sensor_noise_level
+    9.331306f,      // [6] dv_dt
+    72.518186f,     // [7] rolling_mean_5
+    4.974994f       // [8] consec_above_30
 };
 
-const float SCALER_SCALE[6] = {
-    76.636964f,     // [0] voltage_v
-    18163.302349f,  // [1] voltage_squared
-    1325.980100f,   // [2] coverage_area_m2
-    1.320061f,      // [3] voltage_class
-    7.733209f,      // [4] danger_score
-    1.940684f       // [5] sensor_noise_level
+const float SCALER_SCALE[9] = {
+    70.099844f,     // [0] voltage_v
+    16763.105686f,  // [1] voltage_squared
+    1223.761193f,   // [2] coverage_area_m2
+    1.159209f,      // [3] voltage_class
+    6.913384f,      // [4] danger_score
+    1.401997f,      // [5] sensor_noise_level
+    30.771785f,     // [6] dv_dt
+    65.399814f,     // [7] rolling_mean_5
+    4.907424f       // [8] consec_above_30
 };
 
 // ── Constants ─────────────────────────────────────────────────
-// ESD lethal gradient constant (fresh water)
-// 2 V/ft = 6.56 V/m — Rifkin & Shafer (2008), US Coast Guard
 static const float ESD_GRADIENT      = 6.56f;
-
-// Dead zone: readings at or below this voltage are absolute zero
-// Chosen based on ZMPT101B noise floor characterization (~5V max)
 static const float DEAD_ZONE_V       = 5.0f;
+static const int   ROLLING_WINDOW    = 5;    // 5 samples = 2.5 seconds
 
-// Hard threshold: readings at or above this are always Dangerous
-// Bypasses ML to guarantee immediate detection at the 30V cutoff
-static const float DANGEROUS_FLOOR_V = 30.0f;
+// ── Temporal state (persists between calls) ───────────────────
+static float _prev_voltage              = 0.0f;
+static float _rolling_buf[ROLLING_WINDOW] = {0,0,0,0,0};
+static int   _rolling_idx               = 0;
+static int   _consec_above_30           = 0;
 
 // ── Result struct ─────────────────────────────────────────────
 struct LigtasResult {
@@ -95,19 +106,43 @@ static int getVoltageClass(float v) {
     return 4;
 }
 
+// ── Internal: rolling mean of last 5 readings ─────────────────
+static float getRollingMean() {
+    float sum = 0.0f;
+    for (int i = 0; i < ROLLING_WINDOW; i++) sum += _rolling_buf[i];
+    return sum / (float)ROLLING_WINDOW;
+}
+
+// ── Reset temporal state (call on system restart/init) ────────
+void ligtas_reset() {
+    _prev_voltage     = 0.0f;
+    _consec_above_30  = 0;
+    _rolling_idx      = 0;
+    for (int i = 0; i < ROLLING_WINDOW; i++) _rolling_buf[i] = 0.0f;
+}
+
 // ── Main prediction function ──────────────────────────────────
 //  acVoltage — current reading from ZMPT101B (0-250V)
 //
-//  Call this once per sensor reading in your main loop.
+//  Call this ONCE every 500ms in your main loop.
 LigtasResult ligtas_predict(float acVoltage) {
 
     // Clamp to sensor rated range
     if (acVoltage > 250.0f) acVoltage = 250.0f;
     if (acVoltage < 0.0f)   acVoltage = 0.0f;
 
-    // ── FILTER 1: Dead Zone ───────────────────────────────────
-    // Any reading ≤ 5V is treated as absolute 0 (sensor noise floor).
-    // Return Safe immediately — no ML needed.
+    // ── Update temporal state ─────────────────────────────────
+    float dv_dt = acVoltage - _prev_voltage;
+    _prev_voltage = acVoltage;
+
+    _rolling_buf[_rolling_idx] = acVoltage;
+    _rolling_idx = (_rolling_idx + 1) % ROLLING_WINDOW;
+    float rolling_mean = getRollingMean();
+
+    _consec_above_30 = (acVoltage >= 30.0f) ? (_consec_above_30 + 1) : 0;
+
+    // ── FILTER: Dead Zone ─────────────────────────────────────
+    // Any reading <= 5V is sensor noise floor. Return Safe instantly.
     if (acVoltage <= DEAD_ZONE_V) {
         LigtasResult r;
         r.classIndex      = 0;
@@ -119,7 +154,7 @@ LigtasResult ligtas_predict(float acVoltage) {
         return r;
     }
 
-    // ── Compute derived features ──────────────────────────────
+    // ── Compute static features ───────────────────────────────
     float voltage_v          = acVoltage;
     float voltage_squared    = acVoltage * acVoltage;
     float hazard_radius      = acVoltage / ESD_GRADIENT;
@@ -128,28 +163,25 @@ LigtasResult ligtas_predict(float acVoltage) {
     float danger_score       = acVoltage / (1.0f + log(coverage_area_m2 + 1.0f));
     float sensor_noise_level = acVoltage * 0.02f;
 
-    // ── FILTER 2: Hard Threshold Override (≥ 30V) ────────────
-    // Skip ML entirely — deterministic and immediate.
-    int final_prediction;
-    if (acVoltage >= DANGEROUS_FLOOR_V) {
-        final_prediction = 1;  // always Dangerous at or above 30V
-    } else {
-        // ── ML Prediction (5V – 29.99V) ──────────────────────
-        float raw[6] = {
-            voltage_v,
-            voltage_squared,
-            coverage_area_m2,
-            voltage_class,
-            danger_score,
-            sensor_noise_level
-        };
-        float scaled[6];
-        for (int i = 0; i < 6; i++)
-            scaled[i] = (raw[i] - SCALER_MEAN[i]) / SCALER_SCALE[i];
+    // ── ML Prediction (all voltages above dead zone) ──────────
+    float raw[9] = {
+        voltage_v,
+        voltage_squared,
+        coverage_area_m2,
+        voltage_class,
+        danger_score,
+        sensor_noise_level,
+        dv_dt,
+        rolling_mean,
+        (float)_consec_above_30
+    };
 
-        Eloquent::ML::Port::RandomForest clf;
-        final_prediction = clf.predict(scaled);
-    }
+    float scaled[9];
+    for (int i = 0; i < 9; i++)
+        scaled[i] = (raw[i] - SCALER_MEAN[i]) / SCALER_SCALE[i];
+
+    Eloquent::ML::Port::RandomForest clf;
+    int final_prediction = clf.predict(scaled);
 
     // ── Build result ──────────────────────────────────────────
     const char* statusLabels[2] = { "Safe", "Dangerous" };
